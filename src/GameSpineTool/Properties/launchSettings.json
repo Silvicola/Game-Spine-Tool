@@ -1,0 +1,10 @@
+{
+  "profiles": {
+    "GameSpineTool (Package)": {
+      "commandName": "MsixPackage"
+    },
+    "GameSpineTool (Unpackaged)": {
+      "commandName": "Project"
+    }
+  }
+}
