@@ -17,6 +17,10 @@ public sealed partial class MainWindow : Window
     private readonly DispatcherQueue _dispatcher = DispatcherQueue.GetForCurrentThread();
     private DateTime _runStartedAt;
     private bool _inRun;
+    private ProgressBar? _installBar;
+    private TextBlock? _installText;
+    private DateTime _installStartedUtc;
+    private long _installStartBytes;
 
     public MainWindow()
     {
@@ -85,7 +89,26 @@ public sealed partial class MainWindow : Window
                     var label = ev.TryGetProperty("label", out var l)
                         ? (l.GetString() ?? "进度")
                         : "进度";
-                    StageDetail.Text = $"{label} {done} / {all}";
+                    if (label == "下载超分组件")
+                    {
+                        if (_installBar is not null)
+                        {
+                            _installBar.Value = all > 0 ? (double)done / all * 100 : 0;
+                            if (_installText is not null)
+                            {
+                                var secs = (DateTime.UtcNow - _installStartedUtc).TotalSeconds;
+                                var delta = Math.Max(0, done - _installStartBytes);
+                                var mbps = secs > 0.8 ? delta / 1048576.0 / secs : 0;
+                                _installText.Text = mbps > 0
+                                    ? $"{done / 1048576.0:F1} / {all / 1048576.0:F1} MB · {mbps:F1} MB/s"
+                                    : $"{done / 1048576.0:F1} / {all / 1048576.0:F1} MB";
+                            }
+                        }
+                    }
+                    else
+                    {
+                        StageDetail.Text = $"{label} {done} / {all}";
+                    }
                     break;
             }
         });
@@ -138,6 +161,12 @@ public sealed partial class MainWindow : Window
         try
         {
             var autoUpscale = UpscaleSwitch.IsOn;
+            if (autoUpscale && !await EnsureUpscalerAsync())
+            {
+                AppendLog("WARNING", "未下载超分组件，本次跳过超分");
+                autoUpscale = false;
+            }
+
             var run = await App.Engine.CallAsync("run", new
             {
                 output_dir = OutputTextBox.Text,
@@ -172,8 +201,15 @@ public sealed partial class MainWindow : Window
                     var choice = await dialog.ShowAsync();
                     if (choice == ContentDialogResult.Primary)
                     {
-                        await App.Engine.CallAsync("upscale",
-                            new { output_dir = OutputTextBox.Text });
+                        if (await EnsureUpscalerAsync())
+                        {
+                            await App.Engine.CallAsync("upscale",
+                                new { output_dir = OutputTextBox.Text });
+                        }
+                        else
+                        {
+                            AppendLog("INFO", "未安装超分组件，已跳过超分");
+                        }
                     }
                     else
                     {
@@ -193,6 +229,112 @@ public sealed partial class MainWindow : Window
             StartButton.IsEnabled = true;
             SaveRunRecord(success, version, groups, files, skippedGroups, phaseTimings);
         }
+    }
+
+    /// <summary>首次使用超分时按需下载组件。返回 false 表示用户取消或安装失败。</summary>
+    private async Task<bool> EnsureUpscalerAsync()
+    {
+        if (App.Engine is null) return false;
+
+        var check = await App.Engine.CallAsync("check_upscaler");
+        if (check.TryGetProperty("installed", out var ins) && ins.GetBoolean())
+            return true;
+
+        var sizeMb = check.TryGetProperty("size_mb", out var sm) ? sm.GetDouble() : 43.4;
+        var partialMb = check.TryGetProperty("partial_mb", out var pm) ? pm.GetDouble() : 0;
+
+        var bar = new ProgressBar { Minimum = 0, Maximum = 100, Value = 0 };
+        var status = new TextBlock { Text = "准备下载…", TextWrapping = TextWrapping.Wrap };
+        var body = new StackPanel { Spacing = 12 };
+        body.Children.Add(new TextBlock
+        {
+            Text = $"2 倍超分需要 realesrgan-ncnn-vulkan 组件（约 {sizeMb:F1} MB）。" +
+                   "优先从国内镜像下载，失败时回退官方 Release，" +
+                   "校验 SHA-256 后只保留运行所需的四个文件。" +
+                   (partialMb > 0
+                    ? $"\n上次已下载 {partialMb:F1} MB，将从断点继续。"
+                    : ""),
+            TextWrapping = TextWrapping.Wrap,
+        });
+        body.Children.Add(bar);
+        body.Children.Add(status);
+
+        var dialog = new ContentDialog
+        {
+            Title = "下载超分组件",
+            Content = body,
+            PrimaryButtonText = "下载并继续",
+            CloseButtonText = "取消",
+            DefaultButton = ContentDialogButton.Primary,
+            XamlRoot = Content.XamlRoot,
+        };
+
+        var installed = false;
+        var downloading = false;
+
+        dialog.PrimaryButtonClick += async (_, args) =>
+        {
+            if (downloading)
+            {
+                args.Cancel = true;
+                return;
+            }
+
+            var deferral = args.GetDeferral();
+            args.Cancel = true;
+            downloading = true;
+            dialog.IsPrimaryButtonEnabled = false;
+            _installBar = bar;
+            _installText = status;
+            _installStartedUtc = DateTime.UtcNow;
+            _installStartBytes = (long)(partialMb * 1048576);
+            status.Text = "正在测速，选择较快的源…";
+            try
+            {
+                await App.Engine!.CallAsync("install_upscaler");
+                installed = true;
+                dialog.Hide();
+            }
+            catch (EngineException ex) when (ex.Kind == "Cancelled")
+            {
+                dialog.Hide();
+            }
+            catch (Exception ex)
+            {
+                status.Text = $"下载失败：{ex.Message}\n可再点「重试」，会从断点继续。";
+                dialog.PrimaryButtonText = "重试";
+                dialog.IsPrimaryButtonEnabled = true;
+            }
+            finally
+            {
+                downloading = false;
+                _installBar = null;
+                _installText = null;
+                deferral.Complete();
+            }
+        };
+
+        // 下载中点「取消」：先请求引擎停止，再等上面的 await 返回后关闭
+        dialog.CloseButtonClick += async (_, args) =>
+        {
+            if (!downloading) return;
+            args.Cancel = true;
+            var deferral = args.GetDeferral();
+            dialog.IsPrimaryButtonEnabled = false;
+            status.Text = "正在取消…";
+            try
+            {
+                await App.Engine!.CallAsync("cancel_install");
+            }
+            catch
+            {
+                // 取消失败不影响主流程，下载会自行跑完或失败
+            }
+            deferral.Complete();
+        };
+
+        await dialog.ShowAsync();
+        return installed;
     }
 
     private void SaveRunRecord(bool success, string version, int groups, int files,

@@ -3,12 +3,32 @@ from __future__ import annotations
 
 import json
 import sys
+import threading
 import time
 import traceback
 from pathlib import Path
 
 from . import protocol as P
-from . import organizer, scanner, sources, upscaler
+from . import installer, organizer, scanner, sources, upscaler
+
+# 下载超分组件放到工作线程，主循环继续读 stdin，才能接住「取消」
+_install_cancel = threading.Event()
+_install_guard = threading.Lock()
+_installing = False
+
+
+def _install_worker(rid) -> None:
+    global _installing
+    try:
+        P.ok(rid, installer.install(_install_cancel))
+    except installer.DownloadCancelled:
+        P.fail(rid, "Cancelled", "已取消下载")
+    except Exception as exc:
+        P.fail(rid, "InstallFailed", str(exc))
+    finally:
+        with _install_guard:
+            _installing = False
+        _install_cancel.clear()
 
 
 def handle(req: dict) -> None:
@@ -119,6 +139,26 @@ def handle(req: dict) -> None:
         result = scanner.scan(int(args.get("limit", 12)))
         P.log("INFO", f"扫描 {result['scanned']} 个包，命中 {result['target_files']} 个三件套文件")
         P.ok(rid, result)
+        return
+
+    if op == "check_upscaler":
+        P.ok(rid, installer.check())
+        return
+
+    if op == "install_upscaler":
+        global _installing
+        with _install_guard:
+            if _installing:
+                P.fail(rid, "Busy", "已有下载在进行")
+                return
+            _installing = True
+            _install_cancel.clear()
+        threading.Thread(target=_install_worker, args=(rid,), daemon=True).start()
+        return
+
+    if op == "cancel_install":
+        _install_cancel.set()
+        P.ok(rid, {"cancelled": True})
         return
 
     if op == "count_candidates":

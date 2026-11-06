@@ -28,11 +28,8 @@
              CopyToOutputDirectory="PreserveNewest" />
   </ItemGroup>
 
-  <ItemGroup>
-    <Content Include="..\..\tools\realesrgan\**\*.*"
-             Link="tools\realesrgan\%(RecursiveDir)%(Filename)%(Extension)"
-             CopyToOutputDirectory="PreserveNewest" />
-  </ItemGroup>
+  <!-- 超分组件不随包分发：首次使用超分时由引擎从官方 Release 下载并校验 SHA-256，
+       只解压运行所需的四个文件到输出目录的 tools\realesrgan\。 -->
 
   <!-- 便携运行时在构建后复制：声明为 Content 会让 PRI 索引器把
        cp313-win / cpython-313 等文件名误判为资源限定符，产生 PRI249 警告。 -->

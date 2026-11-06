@@ -12,8 +12,11 @@ from __future__ import annotations
 
 import json
 import sys
+import threading
 
 _out = sys.stdout
+# 安装超分组件在工作线程里跑，与主线程的事件可能同时写 stdout
+_lock = threading.Lock()
 
 
 def hide_stdout() -> None:
@@ -22,8 +25,10 @@ def hide_stdout() -> None:
 
 
 def send(obj) -> None:
-    _out.write(json.dumps(obj, ensure_ascii=False) + "\n")
-    _out.flush()
+    line = json.dumps(obj, ensure_ascii=False) + "\n"
+    with _lock:
+        _out.write(line)
+        _out.flush()
 
 
 def event(kind: str, **kw) -> None:

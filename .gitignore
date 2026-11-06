@@ -34,6 +34,9 @@ last-error.txt
 # Published / runnable bundle
 dist/
 
+# Local agent workspace data
+.workbuddy/
+
 # Generated archives and local secrets
 *.zip
 *.7z
@@ -45,6 +48,3 @@ dist/
 
 # Runtime history (written next to the executable)
 history/
-
-# Local agent workspace data
-.workbuddy/
